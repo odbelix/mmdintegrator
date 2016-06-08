@@ -1,0 +1,330 @@
+#!/usr/bin/python
+########################################################################################################################
+# <mmdintegrator, Software for system integration>
+# Copyright (C) 2016  Manuel Moscoso Dominguez manuel.moscoso.d@gmail.com
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
+########################################################################################################################
+# Manuel Moscoso Dominguez <manuel.moscoso.d@gmail.com>
+########################################################################################################################
+import MySQLdb as mmddb
+import syslog
+import sys
+import os.path
+from os import listdir
+import time
+import base64
+from datetime import datetime
+########################################################################################################################
+#Prod
+host = "bWlub3RhdXJvLmFncmljdWx0b3Jlc3RhbGNhLmNs"
+username = "aW50ZWdyYWRvcg=="
+password = "eGltZTk4"
+database = "Y29udHJvbF9kaWlv"
+table = "aW5ncmVzb2ZtYQ=="
+tableTicket = "aW5ncmVzb19mZXJpYQ=="
+#Dev
+#host = "bG9jYWxob3N0"
+#username = "cm9vdA=="
+#password = "MXFhenhzdzI="
+#database = "Y29udHJvbF9kaWlv"
+#table = "aW5ncmVzb2ZtYQ=="
+dbConnection = None
+dbCursor = None
+kg_files = True
+delay = 15
+directory = "/home/PROG2000/EXPORTA/ENTRADA/"
+storedFiles = []
+
+########################################################################################################################
+# Connecting to Database
+########################################################################################################################
+def getDBConnection():
+    global host, username, database, password, table
+    global dbConnection, dbCursor
+
+    try:
+        dbConnection = mmddb.connect(base64.b64decode(host),base64.b64decode(username),base64.b64decode(password),base64.b64decode(database))
+        dbCursor = dbConnection.cursor()
+    except mmddb.Error, err:
+        syslog.syslog(syslog.LOG_ERR, 'mmdintegrator:\t ERROR: %s' % str(err))
+        sys.exit("Error MySQLdb: %s" % err)
+
+
+########################################################################################################################
+# Get the list of CSV files
+########################################################################################################################
+def getDataName():
+    global directory
+    global storedFiles
+    listFileNames = []
+    syslog.syslog(syslog.LOG_INFO, 'mmdintegrator:\t Verificando archivos en directorio')
+    contfiles = 0
+    for file in listdir(directory):
+        if "csv" in file or "CSV" in file:
+            if "swp" not in file:
+                contfiles += 1
+                guide = file.replace(".csv", "")
+                guide = guide.replace(".CSV", "")
+                if guide not in storedFiles:
+                    listFileNames.append((guide))
+
+    syslog.syslog(syslog.LOG_INFO, 'mmdintegrator:\t Se encontraron %d archivos CSV/csv' %(contfiles))
+    return listFileNames
+
+########################################################################################################################
+# Get the list of all DATA that it is already stored in the Database
+########################################################################################################################
+def getDataStored():
+    global dbCursor
+    global dbConnection
+    global table
+    global storedFiles
+    storedFiles = []
+    query = "select  concat(LPAD(SUBSTRING(rut_titular,1,CHAR_LENGTH(rut_titular)-1),9,0),'',LPAD(num_guia,7,0)) as filename from %s" % (base64.b64decode(table))
+    try:
+        dbCursor.execute(query)
+        results = dbCursor.fetchall()
+        dbConnection.commit()
+        syslog.syslog(syslog.LOG_INFO, 'mmdintegrator:\t Se encontraron %d RUT+GUIA en la BD' % (len(results)))
+        for data in results:
+            storedFiles.append(data[0])
+    except mmddb.Error, e:
+        syslog.syslog(syslog.LOG_ERR, 'mmdintegrator:\t ERROR: %s' % str(e))
+        sys.exit("Error MySQLdb: %s" % e)
+        return False
+
+
+########################################################################################################################
+# Check if the information is already in the DB, for each file in the directory
+########################################################################################################################
+def checkData():
+    global dbCursor
+    global table
+    listAlreadyLoaded = []
+
+    # Getting the list of CSV Files
+    list_files = getDataName()
+    totalFile = len(list_files)
+
+    for name in list_files:
+        guide = name[len(name)-7:]
+        rut = name[:len(name)-7]
+        syslog.syslog(syslog.LOG_INFO, 'mmdintegrator:\t Verificando existencia de guias %s para rut %s' %(guide,rut))
+        query = "SELECT id FROM %s WHERE num_guia = %s and rut_titular = '%s'" % (base64.b64decode(table),str(int(guide)),rut)
+        try:
+            dbCursor.execute(query)
+            results = dbCursor.fetchall()
+            if len(results) == 1:
+                listAlreadyLoaded.append(name)
+        except mmddb.Error, e:
+            syslog.syslog(syslog.LOG_ERR, 'mmdintegrator:\t ERROR: %s' % str(e))
+            sys.exit("Error MySQLdb: %s" % e)
+            return False
+
+    #Removing name of files that are already loaded
+    for delete in listAlreadyLoaded:
+        list_files.remove(delete)
+
+
+    syslog.syslog(syslog.LOG_INFO, 'mmdintegrator:\t Se agregaran %s guias' % (str(len(list_files))))
+    return sorted(list_files)
+
+
+
+########################################################################################################################
+# Create Value for Insert from an ArrayList
+########################################################################################################################
+def translateValuesToQuery(listValues):
+    textResult = ""
+
+    if len(listValues[0]) > 0:
+        #num_fma varchar(10) NOT NULL,
+        textResult = textResult + "'%s'," % (listValues[0])
+    else:
+        textResult = textResult + "'',"
+
+    if len(listValues[1]) > 0:
+        #num_guia int(12) NOT NULL,
+        textResult = textResult + "%d," % int(listValues[1])
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    if len(listValues[2]) > 0:
+        #fecha_proceso date NOT NULL,
+        textResult += "'%s'," % listValues[2]
+
+    if len(listValues[3]) > 0:
+        # id_ruporigen varchar(13) NOT NULL,
+        textResult += "'%s'," % listValues[3]
+
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    if len(listValues[4]) > 0:
+        #rut_titular varchar(9) NOT NULL,
+        textResult += "'%s'," % listValues[4]
+    if len(listValues[5]) > 0:
+        #fecha_salida date NOT NULL,
+        textResult += "DATE_FORMAT(now(),'%Y%m%d'),"
+    if len(listValues[6]) > 0:
+        #hora_salida time NOT NULL,
+        textResult += "now(),"
+    if len(listValues[7]) > 0:
+        #id_rupdestino varcahr(13) NOT NULL,
+        textResult += "'%s'," % listValues[7]
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    if len(listValues[8]) > 0:
+        #fecha_llegada date NOT NULL,
+        textResult += "'%s'," % listValues[8]
+    if len(listValues[9]) > 0:
+        #hora_llegada time NOT NULL,
+        textResult += "'%s'," % listValues[9]
+    if len(listValues[10]) > 0:
+        #id_transportista int(11) NOT NULL,
+        textResult += "%d," % int(listValues[10])
+    else:
+        textResult += "%d," % int(0)
+
+    if len(listValues[11]) > 0:
+        #camion varchar(10) NOT NULL,
+        textResult += "'%s'," % listValues[11]
+    else:
+        textResult += "'%s'," % str("")
+
+    if len(listValues[12]) > 0:
+        #carro varchar(10) NOT NULL,
+        textResult += "'%s'," % listValues[12]
+    else:
+        textResult += "'%s'," % str("")
+
+    if len(listValues[13]) > 0:
+        #observaciones varchar(1000) NOT NULL,
+        textResult += "'%s'," % listValues[13]
+    else:
+        textResult += "'%s'," % str("")
+
+    if len(listValues[14]) > 0:
+        # vacunos int(11) NOT NULL,
+        textResult += "%d," % int(listValues[14])
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    if len(listValues[15]) > 0:
+        # caballares int(11) NOT NULL,
+        textResult += "%d," % int(listValues[15])
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    if len(listValues[16]) > 0:
+        # porcinos int(11) NOT NULL,
+        textResult += "%d," % int(listValues[16])
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    if len(listValues[17]) > 0:
+        # ovinos int(11) NOT NULL,
+        textResult += "%d," % int(listValues[17])
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    if len(listValues[18]) > 0:
+        # caprinos int(11) NOT NULL,
+        textResult += "%d" % int(listValues[18])
+    else:
+        textResult = textResult + "%d," % int(0)
+
+    return textResult
+
+
+########################################################################################################################
+# Insert row to the Database
+########################################################################################################################
+def addDataToTable(values,filename):
+    global dbCursor
+    global table
+
+    values = values.replace("\n", "")
+    listValues = values.split(";")
+    valuesForInsert = translateValuesToQuery(listValues)
+
+    ##ROW FOR INSERT
+    query = "INSERT INTO %s (num_fma, num_guia, fecha_proceso, id_ruporigen, rut_titular, fecha_salida, hora_salida," % (base64.b64decode(table))
+    query = query + "id_rupdestino,fecha_llegada, hora_llegada, id_transportista, camion, carro, observaciones,"
+    query = query + "vacunos, caballares, porcinos, ovinos, caprinos ) VALUES (" + valuesForInsert + ")"
+
+    #Executing query
+    try:
+        syslog.syslog(syslog.LOG_INFO, 'mmdintegrator:\t Agregando valores del archivo = %s' % filename)
+        dbCursor.execute(query)
+        results = dbCursor.lastrowid
+        dbConnection.commit()
+        syslog.syslog(syslog.LOG_INFO, 'mmdintegrator:\t Se agrego el registro %s en la tabla  %s' % (str(results),base64.b64decode(table)))
+        return True
+    except mmddb.Error, e:
+        syslog.syslog(syslog.LOG_ERR, 'mmdintegrator:\t ERROR: %s' % str(e))
+        sys.exit("Error MySQLdb: %s" % e)
+        return False
+
+
+########################################################################################################################
+# Read an especific file of the directory
+########################################################################################################################
+def readCSVFile(filename):
+    global kg_files
+    global directory
+    global storedFiles
+
+    filepath = directory + filename + ".CSV"
+
+    syslog.syslog(syslog.LOG_INFO, "mmdintegrator:\t Verificando archivo (%s)" % (filepath))
+    if os.path.exists(filepath) != True:
+        kg_files = False
+        syslog.syslog(syslog.LOG_INFO, "mmdintegrator:\t Archivo (%s) no existe" % (filepath))
+        filepath = filepath.replace("csv", "CSV")
+        if os.path.exists(filepath) != True:
+            syslog.syslog(syslog.LOG_INFO, "mmdintegrator:\t Archivo (%s) no existe" % (filepath))
+            return
+
+    file = open(filepath, 'r')
+    lines = file.readlines()
+    for data in lines:
+        addDataToTable(data,filepath)
+
+    storedFiles.append(filename)
+
+########################################################################################################################
+# Main function:
+########################################################################################################################
+def main():
+    global delay
+    global storedFiles
+
+    #Checking DB connection
+    getDBConnection()
+    servicio = True
+    while servicio == True:
+        getDataStored()
+        filesCsv = checkData()
+        for filename in filesCsv:
+            readCSVFile(filename)
+        time.sleep(delay)
+
+
+
+if __name__ == "__main__":
+    main()
